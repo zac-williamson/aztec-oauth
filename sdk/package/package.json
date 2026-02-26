@@ -1,0 +1,35 @@
+{
+  "name": "@aztec-zklogin/sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "artifacts"
+  ],
+  "scripts": {
+    "copy-artifacts": "mkdir -p artifacts && cp ../../login/contracts/zk_login/target/zk_login-ZkLogin.json artifacts/ && cp ../../registry/contracts/jwks_registry/target/jwks_registry-JwksRegistry.json artifacts/",
+    "build": "npm run copy-artifacts && tsc",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "noir-jwt": "file:../../lib/noir_jwt/js"
+  },
+  "peerDependencies": {
+    "@aztec/aztec.js": ">=0.85.0",
+    "@aztec/foundation": ">=0.85.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^3.2.0",
+    "@types/node": "^22.0.0"
+  }
+}

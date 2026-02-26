@@ -1,0 +1,21 @@
+{
+  "name": "@aztec-zklogin/oauth-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.4",
+    "typescript": "^5.5.0",
+    "vitest": "^3.2.0",
+    "@types/node": "^22.0.0"
+  }
+}
