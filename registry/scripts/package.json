@@ -1,0 +1,22 @@
+{
+  "name": "@aztec-sybil/registry-scripts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "update-registry": "tsx src/update-registry.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@aztec/aztec.js": "4.0.0-devnet.2-patch.1",
+    "@aztec/accounts": "4.0.0-devnet.2-patch.1",
+    "@noble/hashes": "^1.7.0",
+    "@noble/secp256k1": "^2.2.0",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
