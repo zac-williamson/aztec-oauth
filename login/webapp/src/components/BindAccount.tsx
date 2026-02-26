@@ -28,11 +28,14 @@ import {
   clearNonceRandomness,
 } from "../lib/nonce";
 import { generateBindAccountInputs } from "../lib/jwt-inputs";
+import { clearKeys } from "../lib/aztec-client";
+import { useAztec } from "../hooks/useAztec";
 
 type Status =
   | "idle"
   | "connecting"
   | "connected"
+  | "already_bound"
   | "authenticating"
   | "processing"
   | "proving"
@@ -42,46 +45,57 @@ type Status =
 export default function BindAccount() {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string>("");
-  const [aztecAddress, setAztecAddress] = useState<string>("");
   const [selectedProvider, setSelectedProvider] = useState<OAuthProvider | null>(
     null
   );
   const [txHash, setTxHash] = useState<string>("");
 
-  // Check for OAuth redirect on mount
+  const {
+    isConnecting,
+    isConnected,
+    isBound,
+    userAddress,
+    zkLoginClient,
+    error: aztecError,
+    connect,
+  } = useAztec();
+
+  // Sync Aztec connection state to local status
   useEffect(() => {
-    const hash = window.location.hash;
-    if (hash) {
-      handleOAuthCallback(hash);
-    }
-  }, []);
-
-  const connectWallet = useCallback(async () => {
-    setStatus("connecting");
-    setError("");
-    try {
-      // In production, use @aztec/aztec.js:
-      // const pxe = createPXEClient('http://localhost:8080');
-      // const accounts = await pxe.getRegisteredAccounts();
-      // if (accounts.length === 0) throw new Error('No accounts found');
-      // const address = accounts[0].address.toString();
-
-      // Placeholder for development
-      const address =
-        "0x" + Array.from({ length: 64 }, () => "0").join("");
-      setAztecAddress(address);
-      setStatus("connected");
-    } catch (err) {
-      setError(
-        `Failed to connect wallet: ${err instanceof Error ? err.message : String(err)}`
-      );
+    if (isConnecting) setStatus("connecting");
+    else if (isConnected && isBound === true) setStatus("already_bound");
+    else if (isConnected) setStatus("connected");
+    if (aztecError) {
+      setError(`Wallet connection failed: ${aztecError}`);
       setStatus("error");
     }
-  }, []);
+  }, [isConnecting, isConnected, isBound, aztecError]);
+
+  // On OAuth redirect: auto-reconnect wallet, then process the token
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (hash && hash.includes("id_token")) {
+      // Wallet state was lost during redirect — reconnect first
+      if (!isConnected && !isConnecting) {
+        console.log("[BindAccount] OAuth callback detected, auto-reconnecting wallet...");
+        connect();
+      }
+      // Once connected, process the callback
+      if (isConnected && zkLoginClient) {
+        console.log("[BindAccount] Wallet reconnected, processing OAuth callback...");
+        handleOAuthCallback(hash);
+      }
+    }
+  }, [isConnected, isConnecting, zkLoginClient]);
+
+  const connectWallet = useCallback(async () => {
+    setError("");
+    await connect();
+  }, [connect]);
 
   const startOAuth = useCallback(
     async (provider: OAuthProvider) => {
-      if (!aztecAddress) {
+      if (!userAddress) {
         setError("Connect wallet first");
         return;
       }
@@ -93,14 +107,15 @@ export default function BindAccount() {
       try {
         // Generate nonce that binds JWT to this address
         const randomness = generateRandomness();
-        const nonce = await computeNonce(aztecAddress, randomness);
+        const nonce = await computeNonce(userAddress, randomness);
 
         // Store randomness for later proof generation
         storeNonceRandomness(nonce, randomness);
 
-        // Store provider selection
-        sessionStorage.setItem("aztec-sybil-provider", JSON.stringify(provider));
-        sessionStorage.setItem("aztec-sybil-nonce", nonce);
+        // Store provider selection and address
+        localStorage.setItem("aztec-sybil-provider", JSON.stringify(provider));
+        localStorage.setItem("aztec-sybil-nonce", nonce);
+        localStorage.setItem("aztec-sybil-address", userAddress);
 
         // Redirect to OAuth provider
         const redirectUri = window.location.origin + window.location.pathname;
@@ -113,7 +128,7 @@ export default function BindAccount() {
         setStatus("error");
       }
     },
-    [aztecAddress]
+    [userAddress]
   );
 
   const handleOAuthCallback = useCallback(
@@ -128,14 +143,17 @@ export default function BindAccount() {
           throw new Error("No id_token in OAuth redirect");
         }
 
+        console.log("[BindAccount] JWT received from OAuth provider:");
+        console.log(idToken);
+
         // Clear the hash from URL
         window.history.replaceState(null, "", window.location.pathname);
 
         // Recover provider and nonce from session
-        const providerJson = sessionStorage.getItem("aztec-sybil-provider");
-        const nonce = sessionStorage.getItem("aztec-sybil-nonce");
+        const providerJson = localStorage.getItem("aztec-sybil-provider");
+        const nonce = localStorage.getItem("aztec-sybil-nonce");
         if (!providerJson || !nonce) {
-          throw new Error("Missing OAuth session state");
+          throw new Error("Missing OAuth session state — please start over");
         }
         const provider: OAuthProvider = JSON.parse(providerJson);
         setSelectedProvider(provider);
@@ -162,54 +180,48 @@ export default function BindAccount() {
         // Recover nonce randomness
         const randomness = getNonceRandomness(nonce);
         if (randomness === null) {
-          throw new Error("Nonce randomness not found");
+          throw new Error("Nonce randomness not found — please start over");
         }
 
         // Generate circuit inputs using noir-jwt SDK
         setStatus("proving");
-        const kidHash = "0x" + kid; // Placeholder; use actual Pedersen hash
         const inputs = await generateBindAccountInputs(
           idToken,
           signingKey,
           provider.id,
-          kidHash,
+          kid,
           randomness
         );
 
         console.log("Circuit inputs prepared, submitting transaction...");
 
         // Submit bind_account transaction
-        // In production:
-        // const pxe = createPXEClient('http://localhost:8080');
-        // const wallet = await getWallet(pxe);
-        // const contract = await Contract.at(ZK_LOGIN_ADDRESS, ZkLoginAbi, wallet);
-        // const tx = contract.methods.bind_account(
-        //   inputs.jwtData,
-        //   inputs.base64DecodeOffset,
-        //   inputs.pubkeyModulusLimbs,
-        //   inputs.redcParamsLimbs,
-        //   inputs.signatureLimbs,
-        //   inputs.providerId,
-        //   inputs.kidHash,
-        //   inputs.nonceRandomness,
-        // ).send();
-        // const receipt = await tx.wait();
-        // setTxHash(receipt.txHash.toString());
+        if (!zkLoginClient) {
+          // If we lost the client (e.g. page reload), need to reconnect first
+          throw new Error("Wallet not connected — please reconnect and try again");
+        }
 
-        // Placeholder for development
-        setTxHash("0xplaceholder_tx_hash");
+        const hash_ = await zkLoginClient.bindAccount(inputs);
+        setTxHash(hash_);
+
+        // Clean up session storage
         clearNonceRandomness(nonce);
-        sessionStorage.removeItem("aztec-sybil-provider");
-        sessionStorage.removeItem("aztec-sybil-nonce");
+        localStorage.removeItem("aztec-sybil-provider");
+        localStorage.removeItem("aztec-sybil-nonce");
+        localStorage.removeItem("aztec-sybil-address");
         setStatus("success");
       } catch (err) {
-        setError(
-          `Binding failed: ${err instanceof Error ? err.message : String(err)}`
-        );
+        const msg = err instanceof Error ? err.message : String(err);
+        // Detect duplicate binding errors from the contract
+        if (msg.includes("identity already bound") || msg.includes("nullifier")) {
+          setError("This identity is already bound to an Aztec address.");
+        } else {
+          setError(`Binding failed: ${msg}`);
+        }
         setStatus("error");
       }
     },
-    [aztecAddress]
+    [zkLoginClient]
   );
 
   return (
@@ -227,13 +239,13 @@ export default function BindAccount() {
         </button>
       )}
 
-      {status === "connecting" && <p>Connecting wallet...</p>}
+      {status === "connecting" && <p>Connecting to Aztec node and creating account...</p>}
 
       {/* Step 2: Select Provider */}
       {status === "connected" && (
         <div>
           <p>
-            Connected: <code>{aztecAddress.slice(0, 10)}...</code>
+            Connected: <code>{userAddress.slice(0, 10)}...</code>
           </p>
           <p>Choose identity provider:</p>
           <div style={{ display: "flex", gap: 12 }}>
@@ -262,7 +274,7 @@ export default function BindAccount() {
 
       {status === "proving" && (
         <div>
-          <p>Generating ZK proof...</p>
+          <p>Generating ZK proof and submitting transaction...</p>
           <p style={{ color: "#666", fontSize: 14 }}>
             Your JWT and personal data stay on this device. Only the ZK proof is
             sent to the network.
@@ -278,13 +290,62 @@ export default function BindAccount() {
             Your {selectedProvider?.name} identity has been bound to your Aztec
             address.
           </p>
-          <p>
-            Transaction: <code>{txHash.slice(0, 18)}...</code>
-          </p>
+          {txHash && (
+            <p>
+              Transaction: <code>{txHash.slice(0, 18)}...</code>
+            </p>
+          )}
           <p style={{ color: "#666", fontSize: 14 }}>
             On-chain: only an opaque nullifier and provider type are visible.
             Your Google/Apple identity remains private.
           </p>
+          <button
+            onClick={() => {
+              clearKeys();
+              setStatus("idle");
+              setError("");
+              setTxHash("");
+              setSelectedProvider(null);
+            }}
+            style={{ ...buttonStyle, marginTop: 16 }}
+          >
+            New Account + Bind Again
+          </button>
+          <p style={{ color: "#666", fontSize: 12, marginTop: 4 }}>
+            Creates a fresh wallet. Re-binding the same identity should fail (sybil resistance).
+          </p>
+        </div>
+      )}
+
+      {/* Already bound */}
+      {status === "already_bound" && (
+        <div>
+          <p>
+            Connected: <code>{userAddress.slice(0, 10)}...</code>
+          </p>
+          <div
+            style={{
+              padding: 12,
+              background: "#f0fdf4",
+              border: "1px solid #bbf7d0",
+              borderRadius: 8,
+              color: "#16a34a",
+            }}
+          >
+            This address is already bound to an identity. No further action needed.
+          </div>
+          <button
+            onClick={() => {
+              clearKeys();
+              setStatus("idle");
+              setError("");
+              setTxHash("");
+              setSelectedProvider(null);
+            }}
+            style={{ ...buttonStyle, marginTop: 16 }}
+          >
+            New Account + Bind Again
+          </button>
         </div>
       )}
 
@@ -301,6 +362,14 @@ export default function BindAccount() {
           }}
         >
           {error}
+          {(status === "error") && (
+            <button
+              onClick={() => { setStatus("idle"); setError(""); }}
+              style={{ ...buttonStyle, marginTop: 8, display: "block" }}
+            >
+              Try Again
+            </button>
+          )}
         </div>
       )}
     </div>

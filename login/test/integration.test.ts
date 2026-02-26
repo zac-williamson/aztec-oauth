@@ -460,44 +460,13 @@ describe("zkLogin Integration", () => {
       expect(isBound).toBe(false);
     }, 30_000);
 
-    it("get_bound_address returns zero for unused nullifier", async () => {
-      expect(zkLoginContract).toBeDefined();
-
-      const boundAddr = await zkLoginContract.methods
-        .get_bound_address(new Fr(12345n))
-        .simulate({ from: adminAddress });
-
-      // boundAddr could be AztecAddress or raw field depending on return type
-      if (typeof boundAddr === "object" && boundAddr.isZero) {
-        expect(boundAddr.isZero()).toBe(true);
-      } else if (typeof boundAddr === "bigint") {
-        expect(boundAddr).toBe(0n);
-      } else {
-        // Wrap as AztecAddress to check
-        expect(AztecAddress.fromField(new Fr(boundAddr)).isZero()).toBe(true);
-      }
-    }, 30_000);
+    // get_bound_address was removed - binding state is now tracked via
+    // nullifiers only (no public storage of identity->address mappings)
 
     // ── bind_account tests ─────────────────────────────────────────────────
 
     const BIND_SUB = "test-user-bind-001";
     let bindNonceRandomness: any; // Fr
-    let identityNullifier: any;  // Fr
-
-    /**
-     * Replicate Noir's hash_bytes_to_field: packs bytes into 9 Fields (31 bytes
-     * per field, big-endian within each), appends length, then pedersen hashes.
-     */
-    async function hashBytesToField(str: string): Promise<any> {
-      const bytes = new TextEncoder().encode(str);
-      const fields: bigint[] = new Array(9).fill(0n);
-      for (let i = 0; i < bytes.length && i < 255; i++) {
-        const fieldIdx = Math.floor(i / 31);
-        fields[fieldIdx] = fields[fieldIdx] * 256n + BigInt(bytes[i]);
-      }
-      fields[8] = BigInt(bytes.length);
-      return await pedersenHash(fields.map((f: bigint) => new Fr(f)));
-    }
 
     it("bind_account binds an identity to the caller's address", async () => {
       expect(zkLoginContract).toBeDefined();
@@ -526,7 +495,7 @@ describe("zkLogin Integration", () => {
         maxSignedDataLength: 1024, // MAX_JWT_DATA_LENGTH
       });
 
-      // 4. Call bind_account
+      // 4. Call bind_account (use_public_fallback=true since key was just added)
       // BoundedVec encoder expects a plain array; it uses arr.length as len and pads storage
       const jwtBytes = inputs.data!.storage.slice(0, inputs.data!.len);
       await zkLoginContract.methods
@@ -539,6 +508,7 @@ describe("zkLogin Integration", () => {
           new Fr(PROVIDER_GOOGLE),
           kidHash,
           bindNonceRandomness,
+          true, // use_public_fallback
         )
         .send({ from: adminAddress, fee: { paymentMethod } });
 
@@ -553,28 +523,7 @@ describe("zkLogin Integration", () => {
       console.log("is_address_bound(admin) =", isBound);
     }, 600_000);
 
-    it("get_bound_address returns the bound address after binding", async () => {
-      expect(zkLoginContract).toBeDefined();
-
-      // Compute the identity nullifier the same way the Noir circuit does:
-      //   sub_hash = hash_bytes_to_field(sub)
-      //   identity_nullifier = pedersen_hash([sub_hash, provider_id])
-      const subHash = await hashBytesToField(BIND_SUB);
-      identityNullifier = await pedersenHash([subHash, new Fr(PROVIDER_GOOGLE)]);
-
-      const boundAddr = await zkLoginContract.methods
-        .get_bound_address(identityNullifier)
-        .simulate({ from: adminAddress });
-
-      // Verify the bound address matches adminAddress
-      if (typeof boundAddr === "object" && boundAddr.equals) {
-        expect(boundAddr.equals(adminAddress)).toBe(true);
-      } else if (typeof boundAddr === "object" && boundAddr.toBigInt) {
-        expect(boundAddr.toBigInt()).toBe(adminAddress.toBigInt());
-      } else {
-        expect(BigInt(boundAddr)).toBe(adminAddress.toBigInt());
-      }
-      console.log("get_bound_address(nullifier) =", boundAddr.toString());
-    }, 60_000);
+    // get_bound_address was removed - binding state is tracked via nullifiers.
+    // Use is_address_bound to check if an address has been bound.
   });
 });

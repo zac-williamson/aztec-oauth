@@ -1,0 +1,23 @@
+{
+  "name": "@aztec-sybil/e2e-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:e2e": "vitest run monitor-to-bind.test.ts"
+  },
+  "dependencies": {
+    "@aztec/aztec.js": "4.0.0-devnet.2-patch.1",
+    "@aztec/wallets": "4.0.0-devnet.2-patch.1",
+    "@aztec/noir-contracts.js": "4.0.0-devnet.2-patch.1",
+    "@aztec/foundation": "4.0.0-devnet.2-patch.1",
+    "noir-jwt": "file:../../lib/noir_jwt/js",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

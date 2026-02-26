@@ -8,8 +8,8 @@
  * they cannot use it because the nonce commits to the original caller's address.
  */
 
-// In production, use @aztec/bb.js for Pedersen hash
-// import { BarretenbergSync, Fr } from '@aztec/bb.js';
+import { Fr } from "@aztec/aztec.js/fields";
+import { pedersenHash } from "@aztec/foundation/crypto/pedersen";
 
 /**
  * Generate a random field element for nonce commitment.
@@ -22,7 +22,6 @@ export function generateRandomness(): bigint {
   for (const byte of bytes) {
     value = (value << 8n) | BigInt(byte);
   }
-  // Ensure it's within the field
   const FIELD_MODULUS =
     21888242871839275222246405745257275088548364400416034343698204186575808495617n;
   return value % FIELD_MODULUS;
@@ -41,19 +40,8 @@ export async function computeNonce(
   aztecAddress: string,
   randomness: bigint
 ): Promise<string> {
-  // In production, use Barretenberg's Pedersen hash:
-  //
-  // const bb = await BarretenbergSync.new();
-  // const addressField = Fr.fromString(aztecAddress);
-  // const randomField = Fr.fromBigInt(randomness);
-  // const hash = bb.pedersenHash([addressField, randomField]);
-  // return '0x' + Buffer.from(hash).toString('hex');
-
-  // Placeholder: simple hash combining address and randomness
-  // Replace with actual Pedersen hash in production
-  const addressBigInt = BigInt(aztecAddress);
-  const combined = addressBigInt ^ randomness;
-  return "0x" + combined.toString(16).padStart(64, "0");
+  const hash = await pedersenHash([Fr.fromString(aztecAddress), new Fr(randomness)]);
+  return "0x" + hash.toBigInt().toString(16).padStart(64, "0");
 }
 
 /**

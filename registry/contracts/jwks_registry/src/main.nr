@@ -8,6 +8,9 @@ use aztec::macros::aztec;
 /// Keys can be updated via two paths:
 ///   1. Admin-controlled: `admin_set_jwk()` for bootstrapping/testing
 ///   2. Permissionless: `update_jwk()` backed by Primus zkTLS attestations
+///
+/// Dual storage: each key is stored in both PublicMutable (instant reads,
+/// public only) and DelayedPublicMutable (private-readable after delay).
 #[aztec]
 pub contract JwksRegistry {
     use crate::types::StoredJwk;
@@ -15,10 +18,15 @@ pub contract JwksRegistry {
     use aztec::{
         macros::{functions::{external, initializer, only_self, view}, storage::storage},
         protocol::address::AztecAddress,
-        state_vars::{Map, PublicImmutable, PublicMutable},
+        state_vars::{DelayedPublicMutable, Map, PublicImmutable, PublicMutable},
     };
 
     global MAX_ATTESTORS: u32 = 5;
+
+    // Delay in seconds before a key becomes readable from private context.
+    // 1 hour is safe: Google/Apple key rotation overlap is days to weeks,
+    // and the public fallback ensures zero downtime for brand-new keys.
+    global JWK_UPDATE_DELAY: u64 = 3600;
 
     #[storage]
     struct Storage<Context> {
@@ -27,7 +35,12 @@ pub contract JwksRegistry {
         // (provider_id, kid_hash) -> StoredJwk
         // provider_id: 1=Google, 2=Apple
         // kid_hash: pedersen_hash(kid_bytes)
+
+        // Instant reads (public only) - used by public fallback path
         jwks: Map<Field, Map<Field, PublicMutable<StoredJwk, Context>, Context>, Context>,
+
+        // Private reads (after delay) - used by fully private path
+        jwks_delayed: Map<Field, Map<Field, DelayedPublicMutable<StoredJwk, JWK_UPDATE_DELAY, Context>, Context>, Context>,
 
         // Primus attestor secp256k1 public keys, indexed by attestor_index
         attestor_keys_x: Map<Field, PublicMutable<Field, Context>, Context>,
@@ -95,6 +108,7 @@ pub contract JwksRegistry {
             is_valid: true,
         };
         self.storage.jwks.at(provider_id).at(kid_hash).write(jwk);
+        self.storage.jwks_delayed.at(provider_id).at(kid_hash).schedule_value_change(jwk);
     }
 
     /// Admin-only: revoke a JWK entry.
@@ -106,6 +120,7 @@ pub contract JwksRegistry {
         let mut jwk = self.storage.jwks.at(provider_id).at(kid_hash).read();
         jwk.is_valid = false;
         self.storage.jwks.at(provider_id).at(kid_hash).write(jwk);
+        self.storage.jwks_delayed.at(provider_id).at(kid_hash).schedule_value_change(jwk);
     }
 
     // ========================================================================
@@ -222,6 +237,7 @@ pub contract JwksRegistry {
             is_valid: true,
         };
         self.storage.jwks.at(provider_id).at(kid_hash).write(jwk);
+        self.storage.jwks_delayed.at(provider_id).at(kid_hash).schedule_value_change(jwk);
     }
 
     // ========================================================================
@@ -233,6 +249,14 @@ pub contract JwksRegistry {
     #[view]
     fn get_jwk(provider_id: Field, kid_hash: Field) -> StoredJwk {
         self.storage.jwks.at(provider_id).at(kid_hash).read()
+    }
+
+    /// Read a JWK entry from the delayed store (private, callable cross-contract).
+    /// Returns the key only after JWK_UPDATE_DELAY has elapsed since it was set.
+    #[external("private")]
+    #[view]
+    fn get_jwk_private(provider_id: Field, kid_hash: Field) -> StoredJwk {
+        self.storage.jwks_delayed.at(provider_id).at(kid_hash).get_current_value()
     }
 
     /// Read a JWK entry (off-chain utility).

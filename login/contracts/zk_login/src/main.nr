@@ -8,9 +8,14 @@ use aztec::macros::aztec;
 /// Users prove ownership of a Google or Apple account via ZK-verified JWTs,
 /// binding their identity to an AztecAddress with sybil resistance.
 ///
-/// Same identity (sub claim) cannot bind to two different addresses.
-/// The JWT and all personal data stay private - only the nullifier,
-/// provider_id, and kid_hash are visible on-chain.
+/// Fully private: for mature keys (past the registry's delay), the entire
+/// bind_account flow stays in private context with no on-chain data leakage.
+/// For brand-new keys, a public fallback verifies the key against the
+/// instant store, leaking only key metadata (not identity or address).
+///
+/// Sybil resistance is enforced via two nullifiers:
+///   - Identity nullifier: same identity (sub claim) cannot bind twice
+///   - Address nullifier: same address cannot bind twice, enables is_address_bound
 #[aztec]
 pub contract ZkLogin {
     use crate::types::{
@@ -20,7 +25,7 @@ pub contract ZkLogin {
     use aztec::{
         macros::{functions::{external, initializer, only_self, view}, storage::storage},
         protocol::{address::AztecAddress, traits::ToField},
-        state_vars::{Map, PublicImmutable, PublicMutable},
+        state_vars::PublicImmutable,
     };
     use jwt::JWT;
     use jwks_registry::JwksRegistry;
@@ -30,12 +35,6 @@ pub contract ZkLogin {
     struct Storage<Context> {
         // Address of the JwksRegistry contract
         registry: PublicImmutable<AztecAddress, Context>,
-
-        // identity_nullifier -> bound AztecAddress
-        bindings: Map<Field, PublicMutable<AztecAddress, Context>, Context>,
-
-        // AztecAddress -> is_bound (convenience lookup)
-        bound_addresses: Map<AztecAddress, PublicMutable<bool, Context>, Context>,
     }
 
     #[initializer]
@@ -49,6 +48,15 @@ pub contract ZkLogin {
     ///
     /// Private function - the JWT and all personal data remain as private witnesses
     /// and never leave the user's PXE.
+    ///
+    /// When `use_public_fallback` is false (default), the key is read from the
+    /// registry's delayed store via a cross-contract private call. This keeps
+    /// everything private but requires the key to have been in the registry for
+    /// at least JWK_UPDATE_DELAY seconds.
+    ///
+    /// When `use_public_fallback` is true, a public function is enqueued to verify
+    /// the key against the instant store. This leaks provider_id, kid_hash, and
+    /// key fields on-chain, but works immediately for brand-new keys.
     #[external("private")]
     fn bind_account(
         // JWT data (private witnesses)
@@ -62,6 +70,8 @@ pub contract ZkLogin {
         kid_hash: Field,
         // Nonce binding (private)
         nonce_randomness: Field,
+        // Path selection
+        use_public_fallback: bool,
     ) {
         // 1. Verify JWT RS256 signature
         let mut jwt: JWT<MAX_JWT_DATA_LENGTH> = JWT::init(
@@ -114,10 +124,14 @@ pub contract ZkLogin {
         let sub_hash = hash_bytes_to_field(sub);
         let identity_nullifier = pedersen_hash([sub_hash, provider_id]);
 
-        // 6. Push nullifier (protocol-level sybil resistance)
+        // 6. Push identity nullifier (sybil resistance - same identity can't bind twice)
         self.context.push_nullifier(identity_nullifier);
 
-        // 7. Convert limbs from u128 to Field for public function
+        // 7. Push address nullifier (same address can't bind twice + enables is_address_bound)
+        let address_nullifier = pedersen_hash([sender.to_field()]);
+        self.context.push_nullifier(address_nullifier);
+
+        // 8. Convert limbs from u128 to Field for key comparison
         let mut modulus_fields: [Field; 18] = [0; 18];
         let mut redc_fields: [Field; 18] = [0; 18];
         for i in 0..18 {
@@ -125,39 +139,55 @@ pub contract ZkLogin {
             redc_fields[i] = redc_params_limbs[i] as Field;
         }
 
-        // 8. Enqueue public binding storage
-        self.enqueue_self.store_binding(
-            identity_nullifier,
-            sender,
-            provider_id,
-            kid_hash,
-            modulus_fields,
-            redc_fields,
-        );
+        // 9. Verify the RSA key against the JWKS registry
+        let registry_address = self.storage.registry.read();
+
+        if use_public_fallback {
+            // PUBLIC FALLBACK: key is new (not yet in delayed store).
+            // Enqueue public function to verify against instant store.
+            // Trade-off: provider_id, kid_hash, and key fields are visible on-chain,
+            // but identity nullifier and bound address remain private.
+            self.enqueue_self.verify_key_public(
+                provider_id,
+                kid_hash,
+                modulus_fields,
+                redc_fields,
+            );
+        } else {
+            // PRIVATE PATH: key is mature (past delay).
+            // Cross-contract private read - no data leakage.
+            let stored_jwk = self.view(
+                JwksRegistry::at(registry_address).get_jwk_private(provider_id, kid_hash),
+            );
+            assert(stored_jwk.is_valid, "JWK is not valid or not found");
+            for i in 0..18 {
+                assert(
+                    stored_jwk.modulus_limbs[i] == modulus_fields[i],
+                    "modulus mismatch with registry",
+                );
+                assert(
+                    stored_jwk.redc_params_limbs[i] == redc_fields[i],
+                    "redc_params mismatch with registry",
+                );
+            }
+        }
     }
 
-    /// Validate RSA key against the JWKS registry and record the binding.
-    /// Only callable from within this contract.
+    /// Verify an RSA key against the registry's instant (public) store.
+    /// Only callable from within this contract (via enqueue from bind_account).
     #[external("public")]
     #[only_self]
-    fn store_binding(
-        identity_nullifier: Field,
-        bound_address: AztecAddress,
+    fn verify_key_public(
         provider_id: Field,
         kid_hash: Field,
         modulus_limbs: [Field; 18],
         redc_params_limbs: [Field; 18],
     ) {
-        // 1. Read JWK from registry via cross-contract call
         let registry_address = self.storage.registry.read();
         let stored_jwk = self.view(
             JwksRegistry::at(registry_address).get_jwk(provider_id, kid_hash),
         );
-
-        // 2. Verify the JWK is valid
         assert(stored_jwk.is_valid, "JWK is not valid or not found");
-
-        // 3. Verify the modulus matches what was used in private JWT verification
         for i in 0..18 {
             assert(
                 stored_jwk.modulus_limbs[i] == modulus_limbs[i],
@@ -168,14 +198,6 @@ pub contract ZkLogin {
                 "redc_params mismatch with registry",
             );
         }
-
-        // 4. Secondary binding check (primary is nullifier tree)
-        let existing: AztecAddress = self.storage.bindings.at(identity_nullifier).read();
-        assert(existing.is_zero(), "identity already bound");
-
-        // 5. Record the binding
-        self.storage.bindings.at(identity_nullifier).write(bound_address);
-        self.storage.bound_addresses.at(bound_address).write(true);
     }
 
     // ========================================================================
@@ -183,16 +205,11 @@ pub contract ZkLogin {
     // ========================================================================
 
     /// Check if an address has been bound to an identity.
+    /// Queries the nullifier tree for the address nullifier.
     #[external("public")]
     #[view]
     fn is_address_bound(address: AztecAddress) -> pub bool {
-        self.storage.bound_addresses.at(address).read()
-    }
-
-    /// Get the address bound to a specific identity nullifier.
-    #[external("public")]
-    #[view]
-    fn get_bound_address(identity_nullifier: Field) -> pub AztecAddress {
-        self.storage.bindings.at(identity_nullifier).read()
+        let address_nullifier = pedersen_hash([address.to_field()]);
+        self.context.nullifier_exists_unsafe(address_nullifier, self.context.this_address())
     }
 }

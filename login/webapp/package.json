@@ -6,12 +6,17 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run --exclude test/bind-flow.test.ts",
+    "test:integration": "vitest run test/bind-flow.test.ts",
+    "test:all": "vitest run"
   },
   "dependencies": {
-    "@aztec/aztec.js": "^0.87.0",
-    "@aztec/accounts": "^0.87.0",
-    "noir-jwt": "^0.5.1",
+    "@aztec/aztec.js": "4.0.0-devnet.2-patch.1",
+    "@aztec/wallets": "4.0.0-devnet.2-patch.1",
+    "@aztec/noir-contracts.js": "4.0.0-devnet.2-patch.1",
+    "@aztec/foundation": "4.0.0-devnet.2-patch.1",
+    "noir-jwt": "file:../../lib/noir_jwt/js",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -19,7 +24,10 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
+    "jsdom": "^25.0.0",
     "typescript": "^5.7.0",
-    "vite": "^6.0.0"
+    "vite": "^6.0.0",
+    "vite-plugin-node-polyfills": "^0.25.0",
+    "vitest": "^3.0.0"
   }
 }
