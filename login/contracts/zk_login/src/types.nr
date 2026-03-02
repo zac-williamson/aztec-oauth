@@ -14,6 +14,54 @@ pub global MAX_SUB_LENGTH: u32 = 255;
 pub global PROVIDER_GOOGLE: Field = 1;
 pub global PROVIDER_APPLE: Field = 2;
 
+// Maximum length of base64url-encoded RSA-2048 modulus string.
+// RSA-2048 = 256 bytes raw. Base64url encoding: ceil(256/3)*4 = 344 chars.
+pub global MAX_MODULUS_B64_LEN: u32 = 344;
+
+// Output size of base64url decoding MAX_MODULUS_B64_LEN bytes: (344/4)*3 = 258
+pub global MAX_MODULUS_DECODED_LEN: u32 = 258;
+
+/// Pack a 32-byte SHA-256 hash into 2 Field elements (128 bits each).
+/// hash[0..16] -> high, hash[16..32] -> low
+pub fn sha256_to_fields(hash: [u8; 32]) -> [Field; 2] {
+    let mut high: Field = 0;
+    let mut low: Field = 0;
+    for i in 0..16 {
+        high = high * 256 + hash[i] as Field;
+    }
+    for i in 16..32 {
+        low = low * 256 + hash[i] as Field;
+    }
+    [high, low]
+}
+
+/// Convert big-endian decoded bytes into 18 little-endian 120-bit u128 limbs.
+/// This matches the noir-jwt/noir_rsa limb format: limb[0] is least significant,
+/// each limb holds 15 bytes (120 bits).
+pub fn bytes_to_limbs(bytes: BoundedVec<u8, MAX_MODULUS_DECODED_LEN>) -> [u128; 18] {
+    let mut limbs: [u128; 18] = [0; 18];
+    let len = bytes.len();
+
+    // bytes is big-endian: bytes[0] is MSB, bytes[len-1] is LSB.
+    // We need limbs in little-endian order: limb[0] = least significant 120 bits.
+    // Process from LSB (bytes[len-1]) backwards, filling limb[0] first.
+    for limb_idx in 0..18 {
+        let mut limb_val: u128 = 0;
+        for byte_in_limb in 0..15 {
+            // Global byte index from the LSB end
+            let byte_offset = limb_idx as u32 * 15 + byte_in_limb as u32;
+            if byte_offset < len {
+                // Byte position in big-endian array
+                let be_idx = len - 1 - byte_offset;
+                // byte_in_limb=0 is the least significant byte of this limb
+                limb_val = limb_val + (bytes.get(be_idx) as u128 << (byte_in_limb * 8));
+            }
+        }
+        limbs[limb_idx] = limb_val;
+    }
+    limbs
+}
+
 /// Convert a Field to a hex-encoded byte array with "0x" prefix.
 pub fn field_to_hex_bytes(value: Field) -> [u8; MAX_NONCE_LENGTH] {
     let bytes: [u8; 32] = value.to_be_bytes();
@@ -127,4 +175,58 @@ fn test_hash_bytes_to_field_length_sensitive() {
     let hash_a = hash_bytes_to_field(bytes_a);
     let hash_a_null = hash_bytes_to_field(bytes_a_null);
     assert(hash_a != hash_a_null, "different length inputs should produce different hashes");
+}
+
+#[test]
+fn test_sha256_to_fields_zero() {
+    let hash: [u8; 32] = [0; 32];
+    let fields = sha256_to_fields(hash);
+    assert(fields[0] == 0, "high should be 0 for all-zero hash");
+    assert(fields[1] == 0, "low should be 0 for all-zero hash");
+}
+
+#[test]
+fn test_sha256_to_fields_split() {
+    // Set first byte to 1 (should only affect high field)
+    let mut hash: [u8; 32] = [0; 32];
+    hash[0] = 1;
+    let fields = sha256_to_fields(hash);
+    // high = 1 * 256^15 = 1 << 120
+    let expected_high: Field = 1329227995784915872903807060280344576; // 2^120
+    assert(fields[0] == expected_high, "high field mismatch");
+    assert(fields[1] == 0, "low should be 0");
+
+    // Set last byte to 1 (should only affect low field)
+    let mut hash2: [u8; 32] = [0; 32];
+    hash2[31] = 1;
+    let fields2 = sha256_to_fields(hash2);
+    assert(fields2[0] == 0, "high should be 0");
+    assert(fields2[1] == 1, "low should be 1");
+}
+
+#[test]
+fn test_bytes_to_limbs_small() {
+    // Test with a small value: 256 big-endian = [1, 0]
+    let mut bytes: BoundedVec<u8, MAX_MODULUS_DECODED_LEN> = BoundedVec::new();
+    bytes.push(1); // MSB
+    bytes.push(0); // LSB
+
+    let limbs = bytes_to_limbs(bytes);
+    // Value is 256 = 0x100, should be entirely in limb[0]
+    assert(limbs[0] == 256, "limb[0] should be 256");
+    for i in 1..18 {
+        assert(limbs[i] == 0, "other limbs should be 0");
+    }
+}
+
+#[test]
+fn test_bytes_to_limbs_single_byte() {
+    let mut bytes: BoundedVec<u8, MAX_MODULUS_DECODED_LEN> = BoundedVec::new();
+    bytes.push(42);
+
+    let limbs = bytes_to_limbs(bytes);
+    assert(limbs[0] == 42, "limb[0] should be 42");
+    for i in 1..18 {
+        assert(limbs[i] == 0, "other limbs should be 0");
+    }
 }

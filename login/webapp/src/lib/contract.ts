@@ -35,7 +35,7 @@ export class ZkLoginClient {
   async bindAccount(inputs: {
     jwtBytes: number[];
     base64DecodeOffset: number;
-    pubkeyModulusLimbs: bigint[];
+    pubkeyModulusB64Url: number[];
     redcParamsLimbs: bigint[];
     signatureLimbs: bigint[];
     providerId: number;
@@ -51,8 +51,6 @@ export class ZkLoginClient {
         .simulate();
       // If the key is valid in the instant store, it exists.
       // We optimistically try the private path (key may be mature).
-      // The unconstrained view reads the instant store; if the key is there,
-      // it's likely been there long enough for the delay to have passed.
       useFallback = !jwk.is_valid;
     } catch {
       useFallback = true;
@@ -62,7 +60,7 @@ export class ZkLoginClient {
       .bind_account(
         inputs.jwtBytes,
         inputs.base64DecodeOffset,
-        inputs.pubkeyModulusLimbs,
+        inputs.pubkeyModulusB64Url,
         inputs.redcParamsLimbs,
         inputs.signatureLimbs,
         new Fr(inputs.providerId),

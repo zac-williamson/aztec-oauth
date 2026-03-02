@@ -12,8 +12,8 @@ function makeKey(overrides: Partial<ProcessedKey> = {}): ProcessedKey {
     kid: overrides.kid ?? "test-kid",
     kidHash: overrides.kidHash ?? { toBigInt: () => 123n },
     providerId: overrides.providerId ?? 1,
-    modulusLimbs: overrides.modulusLimbs ?? Array(18).fill(42n),
-    redcParamsLimbs: overrides.redcParamsLimbs ?? Array(18).fill(7n),
+    modulusHash: overrides.modulusHash ?? [42n, 43n],
+    modulusBase64Url: overrides.modulusBase64Url ?? "dGVzdA",
   };
 }
 
@@ -58,8 +58,7 @@ describe("diffKeys", () => {
 
     const onChainResult = {
       is_valid: false,
-      modulus_limbs: Array(18).fill(0n),
-      redc_params_limbs: Array(18).fill(0n),
+      modulus_hash: [0n, 0n],
     };
 
     const resultMap = new Map();
@@ -72,14 +71,13 @@ describe("diffKeys", () => {
     expect(diff.toAdd[0].kid).toBe("invalid-key");
   });
 
-  it("classifies a key with all-zero limbs as needing addition", async () => {
+  it("classifies a key with all-zero hash as needing addition", async () => {
     const kidHash = { toBigInt: () => 200n, toString: () => "200" };
-    const key = makeKey({ kid: "zero-limbs", kidHash });
+    const key = makeKey({ kid: "zero-hash", kidHash });
 
     const onChainResult = {
       is_valid: true,
-      modulus_limbs: Array(18).fill(0n),
-      redc_params_limbs: Array(18).fill(0n),
+      modulus_hash: [0n, 0n],
     };
 
     const resultMap = new Map();
@@ -89,23 +87,20 @@ describe("diffKeys", () => {
     const diff = await diffKeys([key], contract, mockAddress);
 
     expect(diff.toAdd).toHaveLength(1);
-    expect(diff.toAdd[0].kid).toBe("zero-limbs");
+    expect(diff.toAdd[0].kid).toBe("zero-hash");
   });
 
   it("classifies a changed key as needing update", async () => {
     const kidHash = { toBigInt: () => 300n, toString: () => "300" };
-    const fetchedLimbs = Array(18).fill(42n);
-    const onChainLimbs = Array(18).fill(99n); // Different!
     const key = makeKey({
       kid: "changed-key",
       kidHash,
-      modulusLimbs: fetchedLimbs,
+      modulusHash: [42n, 43n],
     });
 
     const onChainResult = {
       is_valid: true,
-      modulus_limbs: onChainLimbs,
-      redc_params_limbs: Array(18).fill(7n),
+      modulus_hash: [99n, 100n], // Different!
     };
 
     const resultMap = new Map();
@@ -122,13 +117,11 @@ describe("diffKeys", () => {
 
   it("classifies an unchanged key correctly", async () => {
     const kidHash = { toBigInt: () => 400n, toString: () => "400" };
-    const limbs = Array(18).fill(42n);
-    const key = makeKey({ kid: "same-key", kidHash, modulusLimbs: limbs });
+    const key = makeKey({ kid: "same-key", kidHash, modulusHash: [42n, 43n] });
 
     const onChainResult = {
       is_valid: true,
-      modulus_limbs: limbs.slice(), // Same values
-      redc_params_limbs: Array(18).fill(7n),
+      modulus_hash: [42n, 43n], // Same values
     };
 
     const resultMap = new Map();
@@ -143,21 +136,17 @@ describe("diffKeys", () => {
     expect(diff.toUpdate).toHaveLength(0);
   });
 
-  it("handles Fr-like limb values with toBigInt()", async () => {
+  it("handles Fr-like hash values with toBigInt()", async () => {
     const kidHash = { toBigInt: () => 500n, toString: () => "500" };
-    const fetchedLimbs = Array(18).fill(42n);
-    const key = makeKey({ kid: "fr-limbs", kidHash, modulusLimbs: fetchedLimbs });
+    const key = makeKey({ kid: "fr-hash", kidHash, modulusHash: [42n, 43n] });
 
-    // On-chain limbs returned as Fr-like objects
-    const onChainLimbs = fetchedLimbs.map((v) => ({
-      toBigInt: () => v,
-      toString: () => v.toString(),
-    }));
-
+    // On-chain hash returned as Fr-like objects
     const onChainResult = {
       is_valid: true,
-      modulus_limbs: onChainLimbs,
-      redc_params_limbs: Array(18).fill({ toBigInt: () => 7n }),
+      modulus_hash: [
+        { toBigInt: () => 42n, toString: () => "42" },
+        { toBigInt: () => 43n, toString: () => "43" },
+      ],
     };
 
     const resultMap = new Map();
@@ -167,7 +156,7 @@ describe("diffKeys", () => {
     const diff = await diffKeys([key], contract, mockAddress);
 
     expect(diff.unchanged).toHaveLength(1);
-    expect(diff.unchanged[0].kid).toBe("fr-limbs");
+    expect(diff.unchanged[0].kid).toBe("fr-hash");
   });
 
   it("handles a mix of new, changed, and unchanged keys", async () => {
@@ -180,28 +169,26 @@ describe("diffKeys", () => {
       makeKey({
         kid: "changed-key",
         kidHash: kidHash2,
-        modulusLimbs: Array(18).fill(11n),
+        modulusHash: [11n, 12n],
       }),
       makeKey({
         kid: "same-key",
         kidHash: kidHash3,
-        modulusLimbs: Array(18).fill(33n),
+        modulusHash: [33n, 34n],
       }),
     ];
 
     const resultMap = new Map();
     // Key 1: not found (throws)
-    // Key 2: different limbs
+    // Key 2: different hash
     resultMap.set(kidHash2, {
       is_valid: true,
-      modulus_limbs: Array(18).fill(22n), // Different from 11n
-      redc_params_limbs: Array(18).fill(7n),
+      modulus_hash: [22n, 23n], // Different from [11n, 12n]
     });
-    // Key 3: same limbs
+    // Key 3: same hash
     resultMap.set(kidHash3, {
       is_valid: true,
-      modulus_limbs: Array(18).fill(33n),
-      redc_params_limbs: Array(18).fill(7n),
+      modulus_hash: [33n, 34n],
     });
 
     const contract = mockContract(resultMap);

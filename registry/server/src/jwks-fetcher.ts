@@ -2,10 +2,11 @@
  * JWKS key fetcher and transformer.
  *
  * Fetches JWK key sets from provider endpoints (Google, Apple),
- * filters for RSA/RS256 keys, and transforms them into the limb format
- * expected by the JwksRegistry contract.
+ * filters for RSA/RS256 keys, and computes SHA-256 hash commitments
+ * of the base64url modulus strings for on-chain storage.
  */
 
+import { createHash } from "node:crypto";
 import { computeKidHash } from "./kid-hash.js";
 
 // ─── JWK Types ──────────────────────────────────────────────────────────────
@@ -23,17 +24,15 @@ export interface ProcessedKey {
   kid: string;
   kidHash: any; // Fr element from Pedersen hash
   providerId: number;
-  modulusLimbs: bigint[];
-  redcParamsLimbs: bigint[];
+  modulusHash: [bigint, bigint]; // SHA-256 of base64url modulus, packed [high_128, low_128]
+  modulusBase64Url: string; // Raw base64url modulus string (for bind_account witness)
 }
 
-// ─── Constants ──────────────────────────────────────────────────────────────
+// ─── Pure math utilities ────────────────────────────────────────────────────
 
 const LIMB_BITS = 120n;
 const NUM_LIMBS = 18;
 const RSA_BITS = 2048n;
-
-// ─── Pure math utilities (inlined from registry/scripts/src/jwk-transform.ts)
 
 /**
  * Decode a Base64URL string to a Uint8Array.
@@ -89,8 +88,9 @@ function computeRedcParams(modulus: bigint): bigint {
 
 /**
  * Convert a JWK RSA modulus (Base64URL `n` field) to limb arrays.
+ * Still needed for computing redc_params_limbs (free witness in bind_account).
  */
-function jwkModulusToLimbs(modulusBase64Url: string): {
+export function jwkModulusToLimbs(modulusBase64Url: string): {
   modulusLimbs: bigint[];
   redcParamsLimbs: bigint[];
 } {
@@ -101,6 +101,28 @@ function jwkModulusToLimbs(modulusBase64Url: string): {
   const redcParamsLimbs = splitBigIntToLimbs(redcParams, LIMB_BITS, NUM_LIMBS);
 
   return { modulusLimbs, redcParamsLimbs };
+}
+
+/**
+ * Compute the SHA-256 hash commitment of a base64url modulus string,
+ * packed into two 128-bit bigints [high, low].
+ */
+export function computeModulusHash(modulusBase64Url: string): [bigint, bigint] {
+  const hash = createHash("sha256")
+    .update(modulusBase64Url, "utf8")
+    .digest();
+
+  let high = 0n;
+  for (let i = 0; i < 16; i++) {
+    high = (high << 8n) | BigInt(hash[i]);
+  }
+
+  let low = 0n;
+  for (let i = 16; i < 32; i++) {
+    low = (low << 8n) | BigInt(hash[i]);
+  }
+
+  return [high, low];
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -136,14 +158,14 @@ export async function fetchAndProcessKeys(
   const processed: ProcessedKey[] = [];
   for (const key of rsaKeys) {
     const kidHash = await computeKidHash(key.kid);
-    const { modulusLimbs, redcParamsLimbs } = jwkModulusToLimbs(key.n);
+    const modulusHash = computeModulusHash(key.n);
 
     processed.push({
       kid: key.kid,
       kidHash,
       providerId,
-      modulusLimbs,
-      redcParamsLimbs,
+      modulusHash,
+      modulusBase64Url: key.n,
     });
   }
 

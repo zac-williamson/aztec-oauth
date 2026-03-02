@@ -15,7 +15,7 @@ import { computeKidHash } from "./kid-hash";
 export interface BindAccountInputs {
   jwtBytes: number[];
   base64DecodeOffset: number;
-  pubkeyModulusLimbs: bigint[];
+  pubkeyModulusB64Url: number[]; // UTF-8 bytes of base64url modulus string
   redcParamsLimbs: bigint[];
   signatureLimbs: bigint[];
   providerId: number;
@@ -54,10 +54,15 @@ export async function generateBindAccountInputs(
   // Compute real Pedersen kid hash
   const kidHash = await computeKidHash(kid);
 
+  // Encode the base64url modulus string as UTF-8 bytes for the circuit
+  const pubkeyModulusB64Url = Array.from(
+    new TextEncoder().encode(signingKey.n!)
+  );
+
   return {
     jwtBytes,
     base64DecodeOffset: inputs.base64_decode_offset,
-    pubkeyModulusLimbs: inputs.pubkey_modulus_limbs.map((s: string) => BigInt(s)),
+    pubkeyModulusB64Url,
     redcParamsLimbs: inputs.redc_params_limbs.map((s: string) => BigInt(s)),
     signatureLimbs: inputs.signature_limbs.map((s: string) => BigInt(s)),
     providerId,

@@ -3,3 +3,5 @@ target/
 dist/
 .env
 sdk/package/artifacts/
+primus_application_id.txt
+primus_key.txt

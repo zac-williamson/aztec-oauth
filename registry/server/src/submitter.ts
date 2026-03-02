@@ -27,8 +27,7 @@ export async function submitKey(
     .admin_set_jwk(
       new Fr(key.providerId),
       key.kidHash,
-      key.modulusLimbs.map((l: bigint) => new Fr(l)),
-      key.redcParamsLimbs.map((l: bigint) => new Fr(l))
+      key.modulusHash.map((h: bigint) => new Fr(h))
     )
     .send({ from: adminAddress, fee: { paymentMethod } });
 

@@ -75,37 +75,25 @@ function base64UrlEncodeBuffer(buf: Buffer): string {
 }
 
 /**
- * Convert JWK modulus to 18 limbs of 120 bits each.
+ * Compute the SHA-256 hash of the base64url modulus string,
+ * packed into two 128-bit bigints [high, low].
  */
-function jwkModulusToLimbs(n: string): { modulus: bigint[]; redc: bigint[] } {
-  const bytes = Buffer.from(
-    n.replace(/-/g, "+").replace(/_/g, "/") + "==",
-    "base64"
-  );
-  let modulusBigInt = 0n;
-  for (const byte of bytes) {
-    modulusBigInt = (modulusBigInt << 8n) | BigInt(byte);
+function computeModulusHash(modulusBase64Url: string): [bigint, bigint] {
+  const hash = crypto.createHash("sha256")
+    .update(modulusBase64Url, "utf8")
+    .digest();
+
+  let high = 0n;
+  for (let i = 0; i < 16; i++) {
+    high = (high << 8n) | BigInt(hash[i]);
   }
 
-  const LIMB_BITS = 120n;
-  const mask = (1n << LIMB_BITS) - 1n;
-  const modulus: bigint[] = [];
-  let remaining = modulusBigInt;
-  for (let i = 0; i < 18; i++) {
-    modulus.push(remaining & mask);
-    remaining >>= LIMB_BITS;
+  let low = 0n;
+  for (let i = 16; i < 32; i++) {
+    low = (low << 8n) | BigInt(hash[i]);
   }
 
-  // Barrett reduction params (OVERFLOW_BITS=6 for bignum v0.9.2+)
-  const redcBigInt = (1n << (2n * 2048n + 6n)) / modulusBigInt;
-  const redc: bigint[] = [];
-  remaining = redcBigInt;
-  for (let i = 0; i < 18; i++) {
-    redc.push(remaining & mask);
-    remaining >>= LIMB_BITS;
-  }
-
-  return { modulus, redc };
+  return [high, low];
 }
 
 /**
@@ -184,27 +172,19 @@ describe("zkLogin Integration", () => {
     });
   });
 
-  describe("JWK Transformation", () => {
-    it("converts JWK modulus to 18 limbs", () => {
-      const { modulus, redc } = jwkModulusToLimbs(testKeyPair.jwk.n!);
-      expect(modulus).toHaveLength(18);
-      expect(redc).toHaveLength(18);
+  describe("Modulus Hash Commitment", () => {
+    it("computes deterministic hash from base64url modulus", () => {
+      const hash1 = computeModulusHash(testKeyPair.jwk.n!);
+      const hash2 = computeModulusHash(testKeyPair.jwk.n!);
+      expect(hash1[0]).toBe(hash2[0]);
+      expect(hash1[1]).toBe(hash2[1]);
+    });
 
-      let reconstructed = 0n;
-      for (let i = 17; i >= 0; i--) {
-        reconstructed = (reconstructed << 120n) | modulus[i];
-      }
-
-      const originalBytes = Buffer.from(
-        testKeyPair.jwk.n!.replace(/-/g, "+").replace(/_/g, "/") + "==",
-        "base64"
-      );
-      let originalBigInt = 0n;
-      for (const byte of originalBytes) {
-        originalBigInt = (originalBigInt << 8n) | BigInt(byte);
-      }
-
-      expect(reconstructed).toBe(originalBigInt);
+    it("produces different hashes for different moduli", () => {
+      const pair2 = generateTestRsaKeyPair();
+      const hash1 = computeModulusHash(testKeyPair.jwk.n!);
+      const hash2 = computeModulusHash(pair2.jwk.n!);
+      expect(hash1[0] === hash2[0] && hash1[1] === hash2[1]).toBe(false);
     });
   });
 
@@ -395,7 +375,7 @@ describe("zkLogin Integration", () => {
     it("populates registry via admin_set_jwk", async () => {
       expect(registryContract).toBeDefined();
 
-      const { modulus, redc } = jwkModulusToLimbs(testKeyPair.jwk.n!);
+      const modulusHash = computeModulusHash(testKeyPair.jwk.n!);
 
       kidHash = await computeKidHash(TEST_KID);
 
@@ -403,12 +383,11 @@ describe("zkLogin Integration", () => {
         .admin_set_jwk(
           new Fr(PROVIDER_GOOGLE),
           kidHash,
-          modulus.map((l: bigint) => new Fr(l)),
-          redc.map((l: bigint) => new Fr(l))
+          modulusHash.map((h: bigint) => new Fr(h))
         )
         .send({ from: adminAddress, fee: { paymentMethod } });
 
-      console.log("JWK set for Google provider, kid:", TEST_KID);
+      console.log("JWK hash set for Google provider, kid:", TEST_KID);
     }, 120_000);
 
     it("reads JWK via get_jwk view function", async () => {
@@ -420,14 +399,14 @@ describe("zkLogin Integration", () => {
 
       expect(storedJwk.is_valid).toBe(true);
 
-      const { modulus } = jwkModulusToLimbs(testKeyPair.jwk.n!);
-      for (let i = 0; i < 18; i++) {
-        const storedLimb = typeof storedJwk.modulus_limbs[i] === "bigint"
-          ? storedJwk.modulus_limbs[i]
-          : storedJwk.modulus_limbs[i].toBigInt();
-        expect(storedLimb).toBe(modulus[i]);
+      const expectedHash = computeModulusHash(testKeyPair.jwk.n!);
+      for (let i = 0; i < 2; i++) {
+        const storedHash = typeof storedJwk.modulus_hash[i] === "bigint"
+          ? storedJwk.modulus_hash[i]
+          : storedJwk.modulus_hash[i].toBigInt();
+        expect(storedHash).toBe(expectedHash[i]);
       }
-      console.log("JWK verified: modulus limbs match");
+      console.log("JWK verified: modulus hash matches");
     }, 60_000);
 
     it("deploys ZkLogin contract", async () => {
@@ -459,9 +438,6 @@ describe("zkLogin Integration", () => {
 
       expect(isBound).toBe(false);
     }, 30_000);
-
-    // get_bound_address was removed - binding state is now tracked via
-    // nullifiers only (no public storage of identity->address mappings)
 
     // ── bind_account tests ─────────────────────────────────────────────────
 
@@ -495,14 +471,18 @@ describe("zkLogin Integration", () => {
         maxSignedDataLength: 1024, // MAX_JWT_DATA_LENGTH
       });
 
-      // 4. Call bind_account (use_public_fallback=true since key was just added)
-      // BoundedVec encoder expects a plain array; it uses arr.length as len and pads storage
+      // 4. Encode modulus as UTF-8 bytes for the circuit
+      const pubkeyModulusB64Url = Array.from(
+        new TextEncoder().encode(testKeyPair.jwk.n!)
+      );
+
+      // 5. Call bind_account (use_public_fallback=true since key was just added)
       const jwtBytes = inputs.data!.storage.slice(0, inputs.data!.len);
       await zkLoginContract.methods
         .bind_account(
           jwtBytes,
           inputs.base64_decode_offset,
-          inputs.pubkey_modulus_limbs.map((s: string) => BigInt(s)),
+          pubkeyModulusB64Url,
           inputs.redc_params_limbs.map((s: string) => BigInt(s)),
           inputs.signature_limbs.map((s: string) => BigInt(s)),
           new Fr(PROVIDER_GOOGLE),
@@ -514,7 +494,7 @@ describe("zkLogin Integration", () => {
 
       console.log("bind_account succeeded for sub:", BIND_SUB);
 
-      // 5. Verify is_address_bound now returns true
+      // 6. Verify is_address_bound now returns true
       const isBound = await zkLoginContract.methods
         .is_address_bound(adminAddress)
         .simulate({ from: adminAddress });
@@ -522,8 +502,5 @@ describe("zkLogin Integration", () => {
       expect(isBound).toBe(true);
       console.log("is_address_bound(admin) =", isBound);
     }, 600_000);
-
-    // get_bound_address was removed - binding state is tracked via nullifiers.
-    // Use is_address_bound to check if an address has been bound.
   });
 });

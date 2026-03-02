@@ -11,38 +11,41 @@ import { readOnChainKey } from "./on-chain-reader.js";
 export interface DiffResult {
   /** Keys not yet on-chain or marked invalid */
   toAdd: ProcessedKey[];
-  /** Keys on-chain but with different modulus/redc limbs */
+  /** Keys on-chain but with different modulus hash */
   toUpdate: ProcessedKey[];
   /** Keys already on-chain and matching */
   unchanged: ProcessedKey[];
 }
 
 /**
- * Extract a bigint from a limb value, which may be a Fr, a bigint, or a number.
+ * Extract a bigint from a hash field value, which may be a Fr, a bigint, or a number.
  */
-function limbToBigInt(limb: any): bigint {
-  if (typeof limb === "bigint") return limb;
-  if (typeof limb === "number") return BigInt(limb);
-  if (limb && typeof limb.toBigInt === "function") return limb.toBigInt();
-  return BigInt(limb);
+function fieldToBigInt(field: any): bigint {
+  if (typeof field === "bigint") return field;
+  if (typeof field === "number") return BigInt(field);
+  if (field && typeof field.toBigInt === "function") return field.toBigInt();
+  return BigInt(field);
 }
 
 /**
- * Check whether all 18 modulus limbs are zero.
+ * Check whether both hash fields are zero (empty slot).
  */
-function allLimbsZero(limbs: any[]): boolean {
-  return limbs.every((l) => limbToBigInt(l) === 0n);
+function allHashZero(hashFields: any[]): boolean {
+  return hashFields.every((f) => fieldToBigInt(f) === 0n);
 }
 
 /**
- * Check whether the fetched limbs match the on-chain limbs.
+ * Check whether the fetched hash matches the on-chain hash.
  */
-function limbsMatch(fetchedLimbs: bigint[], onChainLimbs: any[]): boolean {
-  if (fetchedLimbs.length !== onChainLimbs.length) return false;
-  for (let i = 0; i < fetchedLimbs.length; i++) {
-    if (fetchedLimbs[i] !== limbToBigInt(onChainLimbs[i])) return false;
-  }
-  return true;
+function hashesMatch(
+  fetchedHash: [bigint, bigint],
+  onChainHash: any[]
+): boolean {
+  if (onChainHash.length < 2) return false;
+  return (
+    fetchedHash[0] === fieldToBigInt(onChainHash[0]) &&
+    fetchedHash[1] === fieldToBigInt(onChainHash[1])
+  );
 }
 
 /**
@@ -70,9 +73,13 @@ export async function diffKeys(
       fromAddress
     );
 
-    if (!onChain || !onChain.is_valid || allLimbsZero(onChain.modulus_limbs)) {
+    if (
+      !onChain ||
+      !onChain.is_valid ||
+      allHashZero(onChain.modulus_hash)
+    ) {
       toAdd.push(key);
-    } else if (!limbsMatch(key.modulusLimbs, onChain.modulus_limbs)) {
+    } else if (!hashesMatch(key.modulusHash, onChain.modulus_hash)) {
       toUpdate.push(key);
     } else {
       unchanged.push(key);

@@ -5,6 +5,11 @@
  * and applies network-specific defaults.
  */
 
+export interface PrimusConfig {
+  appId: string;
+  appSecret: string;
+}
+
 export interface Config {
   /** Target network: "local" (sandbox) or "devnet" */
   network: "local" | "devnet";
@@ -12,12 +17,16 @@ export interface Config {
   nodeUrl: string;
   /** Deployed JwksRegistry contract address */
   registryAddress: string;
-  /** Admin secret key for deriving the Schnorr signer */
-  adminSecretKey: string;
+  /** Update mode: "admin" (direct set) or "primus" (zkTLS attestation) */
+  mode: "admin" | "primus";
+  /** Admin secret key for deriving the Schnorr signer (required for admin mode) */
+  adminSecretKey: string | undefined;
   /** SponsoredFPC contract address (auto-computed for local if omitted) */
   sponsoredFpcAddress: string | undefined;
   /** Polling interval in milliseconds */
   pollIntervalMs: number;
+  /** Primus zkTLS credentials (required for primus mode) */
+  primus: PrimusConfig | undefined;
 }
 
 const DEFAULT_LOCAL_NODE_URL = "http://localhost:8080";
@@ -27,8 +36,10 @@ const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 /**
  * Load and validate configuration from environment variables.
  *
- * Required env vars: REGISTRY_ADDRESS, ADMIN_SECRET_KEY
- * Optional env vars: NETWORK, AZTEC_NODE_URL, SPONSORED_FPC_ADDRESS, POLL_INTERVAL_MS
+ * Required env vars: REGISTRY_ADDRESS
+ * Admin mode requires: ADMIN_SECRET_KEY
+ * Primus mode requires: PRIMUS_APP_ID, PRIMUS_APP_SECRET
+ * Optional env vars: NETWORK, AZTEC_NODE_URL, SPONSORED_FPC_ADDRESS, POLL_INTERVAL_MS, MODE
  */
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
   const network = parseNetwork(env.NETWORK);
@@ -39,9 +50,23 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     throw new Error("REGISTRY_ADDRESS environment variable is required");
   }
 
+  const mode = parseMode(env.MODE);
+
   const adminSecretKey = env.ADMIN_SECRET_KEY;
-  if (!adminSecretKey) {
-    throw new Error("ADMIN_SECRET_KEY environment variable is required");
+  if (mode === "admin" && !adminSecretKey) {
+    throw new Error("ADMIN_SECRET_KEY environment variable is required in admin mode");
+  }
+
+  let primus: PrimusConfig | undefined;
+  if (mode === "primus") {
+    const appId = env.PRIMUS_APP_ID;
+    const appSecret = env.PRIMUS_APP_SECRET;
+    if (!appId || !appSecret) {
+      throw new Error(
+        "PRIMUS_APP_ID and PRIMUS_APP_SECRET environment variables are required in primus mode"
+      );
+    }
+    primus = { appId, appSecret };
   }
 
   const sponsoredFpcAddress = env.SPONSORED_FPC_ADDRESS || undefined;
@@ -58,9 +83,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     network,
     nodeUrl,
     registryAddress,
+    mode,
     adminSecretKey,
     sponsoredFpcAddress,
     pollIntervalMs,
+    primus,
   };
 }
 
@@ -68,6 +95,12 @@ function parseNetwork(value: string | undefined): "local" | "devnet" {
   if (!value || value === "local") return "local";
   if (value === "devnet") return "devnet";
   throw new Error(`Invalid NETWORK value: "${value}". Must be "local" or "devnet".`);
+}
+
+function parseMode(value: string | undefined): "admin" | "primus" {
+  if (!value || value === "admin") return "admin";
+  if (value === "primus") return "primus";
+  throw new Error(`Invalid MODE value: "${value}". Must be "admin" or "primus".`);
 }
 
 function defaultNodeUrl(network: "local" | "devnet"): string {

@@ -161,8 +161,7 @@ describe("JWKS Monitor Integration", () => {
           .admin_set_jwk(
             new Fr(key.providerId),
             key.kidHash,
-            key.modulusLimbs.map((l: bigint) => new Fr(l)),
-            key.redcParamsLimbs.map((l: bigint) => new Fr(l))
+            key.modulusHash.map((h: bigint) => new Fr(h))
           )
           .send({ from: admin, fee: { paymentMethod: pm } });
         submittedKeys.push(key);
@@ -185,13 +184,13 @@ describe("JWKS Monitor Integration", () => {
 
     expect(storedJwk.is_valid).toBe(true);
 
-    // Verify modulus limbs match
-    for (let i = 0; i < 18; i++) {
-      const storedLimb =
-        typeof storedJwk.modulus_limbs[i] === "bigint"
-          ? storedJwk.modulus_limbs[i]
-          : storedJwk.modulus_limbs[i].toBigInt();
-      expect(storedLimb).toBe(firstKey.modulusLimbs[i]);
+    // Verify modulus hash matches
+    for (let i = 0; i < 2; i++) {
+      const storedHash =
+        typeof storedJwk.modulus_hash[i] === "bigint"
+          ? storedJwk.modulus_hash[i]
+          : storedJwk.modulus_hash[i].toBigInt();
+      expect(storedHash).toBe(firstKey.modulusHash[i]);
     }
 
     console.log("On-chain verification passed for first key");
@@ -212,8 +211,7 @@ describe("JWKS Monitor Integration", () => {
           .admin_set_jwk(
             new Fr(key.providerId),
             key.kidHash,
-            key.modulusLimbs.map((l: bigint) => new Fr(l)),
-            key.redcParamsLimbs.map((l: bigint) => new Fr(l))
+            key.modulusHash.map((h: bigint) => new Fr(h))
           )
           .send({ from: admin, fee: { paymentMethod: pm } });
         submittedKeys.push(key);

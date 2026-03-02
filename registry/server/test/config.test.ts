@@ -12,14 +12,16 @@ describe("loadConfig", () => {
     ADMIN_SECRET_KEY: "0xdeadbeef",
   };
 
-  it("parses a valid config with defaults", () => {
+  it("parses a valid config with defaults (admin mode)", () => {
     const config = loadConfig(validEnv);
     expect(config.network).toBe("local");
     expect(config.nodeUrl).toBe("http://localhost:8080");
     expect(config.registryAddress).toBe("0x1234abcd");
+    expect(config.mode).toBe("admin");
     expect(config.adminSecretKey).toBe("0xdeadbeef");
     expect(config.sponsoredFpcAddress).toBeUndefined();
     expect(config.pollIntervalMs).toBe(300_000);
+    expect(config.primus).toBeUndefined();
   });
 
   it("throws when REGISTRY_ADDRESS is missing", () => {
@@ -29,10 +31,10 @@ describe("loadConfig", () => {
     );
   });
 
-  it("throws when ADMIN_SECRET_KEY is missing", () => {
+  it("throws when ADMIN_SECRET_KEY is missing in admin mode", () => {
     const env = { ...validEnv, ADMIN_SECRET_KEY: undefined };
     expect(() => loadConfig(env as any)).toThrow(
-      "ADMIN_SECRET_KEY environment variable is required"
+      "ADMIN_SECRET_KEY environment variable is required in admin mode"
     );
   });
 
@@ -86,5 +88,35 @@ describe("loadConfig", () => {
     const env = { ...validEnv, SPONSORED_FPC_ADDRESS: "0xfpc123" };
     const config = loadConfig(env);
     expect(config.sponsoredFpcAddress).toBe("0xfpc123");
+  });
+
+  it("parses primus mode with valid credentials", () => {
+    const env = {
+      REGISTRY_ADDRESS: "0x1234abcd",
+      MODE: "primus",
+      PRIMUS_APP_ID: "app-123",
+      PRIMUS_APP_SECRET: "secret-456",
+    };
+    const config = loadConfig(env);
+    expect(config.mode).toBe("primus");
+    expect(config.primus).toEqual({ appId: "app-123", appSecret: "secret-456" });
+    expect(config.adminSecretKey).toBeUndefined();
+  });
+
+  it("throws when primus mode missing credentials", () => {
+    const env = {
+      REGISTRY_ADDRESS: "0x1234abcd",
+      MODE: "primus",
+    };
+    expect(() => loadConfig(env)).toThrow(
+      "PRIMUS_APP_ID and PRIMUS_APP_SECRET environment variables are required in primus mode"
+    );
+  });
+
+  it("throws for invalid MODE value", () => {
+    const env = { ...validEnv, MODE: "invalid" };
+    expect(() => loadConfig(env)).toThrow(
+      'Invalid MODE value: "invalid". Must be "admin" or "primus".'
+    );
   });
 });

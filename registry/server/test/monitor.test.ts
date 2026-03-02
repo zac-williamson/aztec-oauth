@@ -14,8 +14,8 @@ function makeKey(kid: string, providerId = 1): ProcessedKey {
     kid,
     kidHash: { toBigInt: () => BigInt(kid.length) },
     providerId,
-    modulusLimbs: Array(18).fill(42n),
-    redcParamsLimbs: Array(18).fill(7n),
+    modulusHash: [42n, 43n],
+    modulusBase64Url: "dGVzdA",
   };
 }
 

@@ -21,7 +21,7 @@ const PROVIDER_IDS: Record<string, number> = {
 async function fetchJwk(
   issuer: string,
   kid: string
-): Promise<JsonWebKey> {
+): Promise<JsonWebKey & { n: string }> {
   const jwksUrls: Record<string, string> = {
     "https://accounts.google.com": "https://www.googleapis.com/oauth2/v3/certs",
     "https://appleid.apple.com": "https://appleid.apple.com/auth/keys",
@@ -33,7 +33,7 @@ async function fetchJwk(
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Failed to fetch JWKS: ${response.status}`);
 
-  const jwks = (await response.json()) as { keys: Array<JsonWebKey & { kid: string }> };
+  const jwks = (await response.json()) as { keys: Array<JsonWebKey & { kid: string; n: string }> };
   const key = jwks.keys.find((k) => k.kid === kid);
 
   if (!key) throw new Error(`Key ${kid} not found in JWKS for ${issuer}`);
@@ -46,7 +46,8 @@ async function fetchJwk(
  *
  * Takes a raw JWT string (id_token from Google/Apple) and produces:
  * - JWT byte array and decode offset
- * - RSA public key limbs (modulus + Barrett reduction params)
+ * - Base64url modulus string as UTF-8 bytes (for in-circuit hashing + decoding)
+ * - Barrett reduction params limbs (free witness)
  * - Signature limbs
  * - Provider ID and kid hash
  */
@@ -62,7 +63,7 @@ export async function generateBindInputs(params: {
 }): Promise<{
   jwtBytes: number[];
   base64DecodeOffset: number;
-  pubkeyModulusLimbs: bigint[];
+  pubkeyModulusB64Url: number[];
   redcParamsLimbs: bigint[];
   signatureLimbs: bigint[];
   providerId: number;
@@ -104,10 +105,15 @@ export async function generateBindInputs(params: {
     kid
   );
 
+  // Encode the base64url modulus string as UTF-8 bytes for the circuit
+  const pubkeyModulusB64Url = Array.from(
+    new TextEncoder().encode(jwk.n)
+  );
+
   return {
     jwtBytes,
     base64DecodeOffset: inputs.base64_decode_offset,
-    pubkeyModulusLimbs: inputs.pubkey_modulus_limbs.map((s: string) => BigInt(s)),
+    pubkeyModulusB64Url,
     redcParamsLimbs: inputs.redc_params_limbs.map((s: string) => BigInt(s)),
     signatureLimbs: inputs.signature_limbs.map((s: string) => BigInt(s)),
     providerId,

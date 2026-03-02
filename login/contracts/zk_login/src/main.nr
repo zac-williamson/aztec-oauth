@@ -19,16 +19,19 @@ use aztec::macros::aztec;
 #[aztec]
 pub contract ZkLogin {
     use crate::types::{
-        MAX_JWT_DATA_LENGTH, MAX_NONCE_LENGTH, MAX_SUB_LENGTH, PROVIDER_APPLE, PROVIDER_GOOGLE,
-        field_to_hex_bytes, hash_bytes_to_field,
+        MAX_JWT_DATA_LENGTH, MAX_MODULUS_B64_LEN, MAX_MODULUS_DECODED_LEN,
+        MAX_NONCE_LENGTH, MAX_SUB_LENGTH, PROVIDER_APPLE, PROVIDER_GOOGLE,
+        bytes_to_limbs, field_to_hex_bytes, hash_bytes_to_field, sha256_to_fields,
     };
     use aztec::{
         macros::{functions::{external, initializer, only_self, view}, storage::storage},
         protocol::{address::AztecAddress, traits::ToField},
         state_vars::PublicImmutable,
     };
+    use base64::BASE64_URL_DECODER;
     use jwt::JWT;
     use jwks_registry::JwksRegistry;
+    use sha256::sha256_var;
     use std::hash::pedersen_hash;
 
     #[storage]
@@ -49,20 +52,18 @@ pub contract ZkLogin {
     /// Private function - the JWT and all personal data remain as private witnesses
     /// and never leave the user's PXE.
     ///
-    /// When `use_public_fallback` is false (default), the key is read from the
-    /// registry's delayed store via a cross-contract private call. This keeps
-    /// everything private but requires the key to have been in the registry for
-    /// at least JWK_UPDATE_DELAY seconds.
+    /// The caller provides the base64url-encoded RSA modulus string. The circuit:
+    /// 1. SHA-256 hashes it and verifies against the registry's stored commitment
+    /// 2. Base64url decodes it to raw bytes and converts to limbs for RSA verification
     ///
-    /// When `use_public_fallback` is true, a public function is enqueued to verify
-    /// the key against the instant store. This leaks provider_id, kid_hash, and
-    /// key fields on-chain, but works immediately for brand-new keys.
+    /// `redc_params_limbs` remains a free witness (Barrett reduction params can't
+    /// be efficiently derived in-circuit from the modulus).
     #[external("private")]
     fn bind_account(
         // JWT data (private witnesses)
         jwt_data: BoundedVec<u8, MAX_JWT_DATA_LENGTH>,
         base64_decode_offset: u32,
-        pubkey_modulus_limbs: [u128; 18],
+        pubkey_modulus_b64url: BoundedVec<u8, MAX_MODULUS_B64_LEN>,
         redc_params_limbs: [u128; 18],
         signature_limbs: [u128; 18],
         // Public inputs
@@ -73,7 +74,19 @@ pub contract ZkLogin {
         // Path selection
         use_public_fallback: bool,
     ) {
-        // 1. Verify JWT RS256 signature
+        // 1. Hash the base64url modulus string and derive the hash commitment
+        let modulus_sha = sha256_var(
+            pubkey_modulus_b64url.storage(),
+            pubkey_modulus_b64url.len(),
+        );
+        let modulus_hash = sha256_to_fields(modulus_sha);
+
+        // 2. Base64url decode the modulus string to raw bytes, then convert to limbs
+        let decoded: BoundedVec<u8, MAX_MODULUS_DECODED_LEN> =
+            BASE64_URL_DECODER::decode_var(pubkey_modulus_b64url);
+        let pubkey_modulus_limbs: [u128; 18] = bytes_to_limbs(decoded);
+
+        // 3. Verify JWT RS256 signature using the derived limbs
         let mut jwt: JWT<MAX_JWT_DATA_LENGTH> = JWT::init(
             jwt_data,
             base64_decode_offset,
@@ -83,7 +96,7 @@ pub contract ZkLogin {
         );
         jwt.verify();
 
-        // 2. Verify issuer matches provider
+        // 4. Verify issuer matches provider
         if provider_id == PROVIDER_GOOGLE {
             let expected_iss: BoundedVec<u8, 27> = BoundedVec::from_array(
                 "https://accounts.google.com".as_bytes(),
@@ -98,10 +111,10 @@ pub contract ZkLogin {
             assert(false, "unsupported provider");
         }
 
-        // 3. Extract sub claim (unique stable user identifier)
+        // 5. Extract sub claim (unique stable user identifier)
         let sub: BoundedVec<u8, MAX_SUB_LENGTH> = jwt.get_claim_string("sub".as_bytes());
 
-        // 4. Verify nonce binds to caller (anti-front-running)
+        // 6. Verify nonce binds to caller (anti-front-running)
         let sender: AztecAddress = self.msg_sender();
         let expected_nonce_hash = pedersen_hash([sender.to_field(), nonce_randomness]);
 
@@ -120,38 +133,29 @@ pub contract ZkLogin {
             }
         }
 
-        // 5. Compute identity nullifier
+        // 7. Compute identity nullifier
         let sub_hash = hash_bytes_to_field(sub);
         let identity_nullifier = pedersen_hash([sub_hash, provider_id]);
 
-        // 6. Push identity nullifier (sybil resistance - same identity can't bind twice)
+        // 8. Push identity nullifier (sybil resistance - same identity can't bind twice)
         self.context.push_nullifier(identity_nullifier);
 
-        // 7. Push address nullifier (same address can't bind twice + enables is_address_bound)
+        // 9. Push address nullifier (same address can't bind twice + enables is_address_bound)
         let address_nullifier = pedersen_hash([sender.to_field()]);
         self.context.push_nullifier(address_nullifier);
 
-        // 8. Convert limbs from u128 to Field for key comparison
-        let mut modulus_fields: [Field; 18] = [0; 18];
-        let mut redc_fields: [Field; 18] = [0; 18];
-        for i in 0..18 {
-            modulus_fields[i] = pubkey_modulus_limbs[i] as Field;
-            redc_fields[i] = redc_params_limbs[i] as Field;
-        }
-
-        // 9. Verify the RSA key against the JWKS registry
+        // 10. Verify the key hash commitment against the JWKS registry
         let registry_address = self.storage.registry.read();
 
         if use_public_fallback {
             // PUBLIC FALLBACK: key is new (not yet in delayed store).
             // Enqueue public function to verify against instant store.
-            // Trade-off: provider_id, kid_hash, and key fields are visible on-chain,
+            // Trade-off: provider_id, kid_hash, and modulus_hash (4 Fields) are visible on-chain,
             // but identity nullifier and bound address remain private.
             self.enqueue_self.verify_key_public(
                 provider_id,
                 kid_hash,
-                modulus_fields,
-                redc_fields,
+                modulus_hash,
             );
         } else {
             // PRIVATE PATH: key is mature (past delay).
@@ -160,44 +164,39 @@ pub contract ZkLogin {
                 JwksRegistry::at(registry_address).get_jwk_private(provider_id, kid_hash),
             );
             assert(stored_jwk.is_valid, "JWK is not valid or not found");
-            for i in 0..18 {
-                assert(
-                    stored_jwk.modulus_limbs[i] == modulus_fields[i],
-                    "modulus mismatch with registry",
-                );
-                assert(
-                    stored_jwk.redc_params_limbs[i] == redc_fields[i],
-                    "redc_params mismatch with registry",
-                );
-            }
+            assert(
+                stored_jwk.modulus_hash[0] == modulus_hash[0],
+                "modulus hash mismatch with registry (high)",
+            );
+            assert(
+                stored_jwk.modulus_hash[1] == modulus_hash[1],
+                "modulus hash mismatch with registry (low)",
+            );
         }
     }
 
-    /// Verify an RSA key against the registry's instant (public) store.
+    /// Verify a key hash commitment against the registry's instant (public) store.
     /// Only callable from within this contract (via enqueue from bind_account).
     #[external("public")]
     #[only_self]
     fn verify_key_public(
         provider_id: Field,
         kid_hash: Field,
-        modulus_limbs: [Field; 18],
-        redc_params_limbs: [Field; 18],
+        modulus_hash: [Field; 2],
     ) {
         let registry_address = self.storage.registry.read();
         let stored_jwk = self.view(
             JwksRegistry::at(registry_address).get_jwk(provider_id, kid_hash),
         );
         assert(stored_jwk.is_valid, "JWK is not valid or not found");
-        for i in 0..18 {
-            assert(
-                stored_jwk.modulus_limbs[i] == modulus_limbs[i],
-                "modulus mismatch with registry",
-            );
-            assert(
-                stored_jwk.redc_params_limbs[i] == redc_params_limbs[i],
-                "redc_params mismatch with registry",
-            );
-        }
+        assert(
+            stored_jwk.modulus_hash[0] == modulus_hash[0],
+            "modulus hash mismatch with registry (high)",
+        );
+        assert(
+            stored_jwk.modulus_hash[1] == modulus_hash[1],
+            "modulus hash mismatch with registry (low)",
+        );
     }
 
     // ========================================================================

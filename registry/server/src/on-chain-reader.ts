@@ -8,8 +8,7 @@ import { Fr } from "@aztec/aztec.js/fields";
 
 export interface StoredJwk {
   is_valid: boolean;
-  modulus_limbs: any[]; // Array of 18 Fr-like values
-  redc_params_limbs: any[]; // Array of 18 Fr-like values
+  modulus_hash: any[]; // Array of 2 Fr-like values [high_128, low_128]
 }
 
 /**

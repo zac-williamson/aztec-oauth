@@ -4,8 +4,8 @@ use aztec::macros::aztec;
 
 /// JWKS Registry Contract
 ///
-/// Stores RSA-2048 public keys from Google and Apple JWKS endpoints.
-/// Keys can be updated via two paths:
+/// Stores SHA-256 hash commitments of RSA-2048 public keys from Google and Apple
+/// JWKS endpoints. Keys can be updated via two paths:
 ///   1. Admin-controlled: `admin_set_jwk()` for bootstrapping/testing
 ///   2. Permissionless: `update_jwk()` backed by Primus zkTLS attestations
 ///
@@ -13,7 +13,7 @@ use aztec::macros::aztec;
 /// public only) and DelayedPublicMutable (private-readable after delay).
 #[aztec]
 pub contract JwksRegistry {
-    use crate::types::StoredJwk;
+    use crate::types::{StoredJwk, sha256_to_fields};
     use att_verifier_lib::{verify_attestation_hashing, MAX_CONTENT_LEN, MAX_URL_LEN};
     use aztec::{
         macros::{functions::{external, initializer, only_self, view}, storage::storage},
@@ -88,12 +88,12 @@ pub contract JwksRegistry {
     }
 
     /// Admin-only: directly set a JWK entry (for bootstrapping/testing).
+    /// Takes the SHA-256 hash commitment of the base64url modulus string.
     #[external("public")]
     fn admin_set_jwk(
         provider_id: Field,
         kid_hash: Field,
-        modulus_limbs: [Field; 18],
-        redc_params_limbs: [Field; 18],
+        modulus_hash: [Field; 2],
     ) {
         let admin = self.storage.admin.read();
         assert(self.msg_sender() == admin, "caller is not admin");
@@ -103,8 +103,7 @@ pub contract JwksRegistry {
         );
 
         let jwk = StoredJwk {
-            modulus_limbs,
-            redc_params_limbs,
+            modulus_hash,
             is_valid: true,
         };
         self.storage.jwks.at(provider_id).at(kid_hash).write(jwk);
@@ -130,7 +129,8 @@ pub contract JwksRegistry {
     /// Permissionless JWK update backed by a Primus zkTLS attestation.
     ///
     /// Private function: the attestation data stays as private witnesses.
-    /// After verification, enqueues a public call to store the JWK.
+    /// After verification, packs data_hashes[1] (the SHA-256 of the modulus
+    /// plaintext) into 2 Fields and enqueues a public call to store the hash.
     #[external("private")]
     fn update_jwk(
         // Primus attestation data (private witnesses)
@@ -142,11 +142,9 @@ pub contract JwksRegistry {
         allowed_urls: [BoundedVec<u8, MAX_URL_LEN>; 3],
         data_hashes: [[u8; 32]; 2],
         plain_json_response: [BoundedVec<u8, MAX_CONTENT_LEN>; 2],
-        // Extracted JWK data
+        // Extracted JWK metadata
         provider_id: Field,
         kid_hash: Field,
-        modulus_limbs: [Field; 18],
-        redc_params_limbs: [Field; 18],
     ) {
         // 1. Verify the Primus attestation (ECDSA signature + URL match + SHA-256 hash)
         let url_hashes: [Field; 2] = verify_attestation_hashing(
@@ -168,12 +166,15 @@ pub contract JwksRegistry {
             attestor_y_field = attestor_y_field * 256 + attestor_pub_key_y[i] as Field;
         }
 
-        // 3. Enqueue public function to validate and store
+        // 3. data_hashes[1] IS the SHA-256 of the modulus plaintext (verified by attestation).
+        //    Pack it into 2 Fields for storage.
+        let modulus_hash = sha256_to_fields(data_hashes[1]);
+
+        // 4. Enqueue public function to validate and store
         self.enqueue_self.store_jwk(
             provider_id,
             kid_hash,
-            modulus_limbs,
-            redc_params_limbs,
+            modulus_hash,
             url_hashes,
             attestor_x_field,
             attestor_y_field,
@@ -187,8 +188,7 @@ pub contract JwksRegistry {
     fn store_jwk(
         provider_id: Field,
         kid_hash: Field,
-        modulus_limbs: [Field; 18],
-        redc_params_limbs: [Field; 18],
+        modulus_hash: [Field; 2],
         url_hashes: [Field; 2],
         attestor_x: Field,
         attestor_y: Field,
@@ -230,10 +230,9 @@ pub contract JwksRegistry {
             "invalid provider_id",
         );
 
-        // 4. Store the JWK
+        // 4. Store the JWK hash commitment
         let jwk = StoredJwk {
-            modulus_limbs,
-            redc_params_limbs,
+            modulus_hash,
             is_valid: true,
         };
         self.storage.jwks.at(provider_id).at(kid_hash).write(jwk);
